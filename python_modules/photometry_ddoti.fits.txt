@@ -1,0 +1,89 @@
+# Example usage description for COLIBRI photometry.fits file in python pyfits
+#  11/26/2025
+
+from astropy.io.fits import getdata
+
+# example
+file='photometry_20251017T084147_C1_r.fits'
+
+d1=getdata(file,1)
+d2=getdata(file,2)
+d3=getdata(file,3)
+
+print (d1.columns)
+ColDefs(
+    name = 'filename'; format = '60A'
+    name = 'DATE-OBS'; format = '20A'
+    name = 'DATE-OBE'; format = '20A'
+    name = 'T0'; format = 'D'
+    name = 'T1'; format = 'D'
+    name = 'exptime'; format = 'E'
+    name = 'x0'; format = 'E'
+    name = 'y0'; format = 'E'
+    name = 'fwhm'; format = 'E'
+    name = 'airmass'; format = 'E'
+    name = 'skylev'; format = 'E'
+    name = 'magzero'; format = 'E'
+    name = 'maglim'; format = 'E'
+    name = 'mag0'; format = 'E'
+    name = 'dmag0'; format = 'E'
+    name = 'var0'; format = 'E'
+)
+
+# these are the data for each image that went into the stack
+# in this case d1.shape is (45,), indicating there are 44 images
+# and 1 stack; each data vector is 45 long
+#  grab some useful ones
+t0=d1['T0']
+t1=d1['T1']
+dt=d1['exptime']
+# note, first element t0[0] or t1[0] or dt[0], is for the stack
+# var0 is the image background variance and can be used for flux weighting
+
+
+print (d2.columns)
+ColDefs(
+    name = 'SRCID'; format = 'J'
+    name = 'RA'; format = 'D'
+    name = 'DEC'; format = 'D'
+    name = 'flx'; format = 'E'
+    name = 'dflx'; format = 'E'
+    name = 'flx_ref'; format = 'E'
+    name = 'dflx_ref'; format = 'E'
+    name = 'flx_sub'; format = 'E'
+    name = 'dflx_sub'; format = 'E'
+    name = 'flxc'; format = 'E'
+    name = 'dflxc'; format = 'E'
+    name = 'x'; format = 'E'
+    name = 'y'; format = 'E'
+    name = 'fwhm'; format = 'E'
+    name = 'HIGHPM'; format = 'J'
+    name = 'CATDIS'; format = 'E'
+    name = 'CATMAG'; format = 'E'
+    name = 'CATID'; format = 'J'
+    name = 'SUBMAG'; format = 'E'
+    name = 'A_lam'; format = 'E'
+    name = 'FLAGS'; format = 'J'
+)
+
+
+# these are data for each source in the stack
+#  in this case, d2.shape is (537,), indicating 537 sources
+# uncatalogued sources are typically given negative SRCID's
+
+# useful for finding and identifying sources (can also use SRCID)
+ra=d2['RA']
+dec=d2['DEC']
+
+
+print (d3.shape)
+(45, 537, 4)
+# these are flux and error measurements for sources measured in
+# the stack (ie, d3[0]) as well as the 44 frames going into the stack, 
+# with 537 total sources.  For each source there are 4 data:
+# flx, dflx, flx_big, dflx_big
+# flx,dflx are psf fluxes and errors
+# flx_big,dflx_big are large aperture fluxes and errors
+# calculate some magnitudes and errors (clipping at 1 is optional):
+mag = 25 - 2.5*log10( flx.clip(1) )
+dmag = 2.5/log(10)*dflx/flx.clip(1)

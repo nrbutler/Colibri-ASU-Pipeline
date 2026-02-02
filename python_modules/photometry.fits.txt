@@ -1,0 +1,71 @@
+# Example usage description for COLIBRI photometry.fits file in python pyfits
+#  10/26/2025
+
+from astropy.io.fits import getdata
+
+# example
+file='photometry_20251001T022212_C1_i.fits'
+
+d1=getdata(file,1)
+d2=getdata(file,2)
+d3=getdata(file,3)
+
+print (d1.columns)
+ColDefs(
+    name = 'filename'; format = '60A'
+    name = 'IMID'; format = 'I'
+    name = 'IMNUM'; format = 'I'
+    name = 'IMPID'; format = 'I'
+    name = 'DATE-OBS'; format = '20A'
+    name = 'DATE-OBE'; format = '20A'
+    name = 'T0'; format = 'D'
+    name = 'T1'; format = 'D'
+    name = 'dt'; format = 'E'
+    name = 'fwhm'; format = 'E'
+    name = 'magzero'; format = 'E'
+    name = 'maglim'; format = 'E'
+    name = 'mag0'; format = 'E'
+    name = 'dmag0'; format = 'E'
+)
+
+# these are the data for each image that went into the stack, including sub-stacks
+# in this case d1.shape is (43,), indicating there are 42 images
+# and 1 stack; each data vector is 18 long
+# each image has an ID (IMID), a parent ID (IMPID, the stack or substack it was combined
+# into), and was build from IMNUM frames.
+#  grab some useful ones
+t0=d1['T0']
+t1=d1['T1']
+dt=d1['dt']
+# note, first element t0[0] or t1[0] or dt[0], is for the stack
+
+
+print (d2.columns)
+ColDefs(
+    name = 'SRCID'; format = 'J'
+    name = 'RA'; format = 'D'
+    name = 'DEC'; format = 'D'
+    name = 'mag'; format = 'E'
+    name = 'dmag'; format = 'E'
+    name = 'fwhm'; format = 'E'
+    name = 'dt'; format = 'E'
+)
+
+# these are the data for each source in the stack
+#  in this case, d2.shape is (28516,), indicating 28516 sources
+# uncatalogued sources are typicall given negative SRCID's
+
+# useful for finding and identifying sources (can also use SRCID)
+ra=d2['RA']
+dec=d2['DEC']
+
+
+print (d3.shape)
+(42, 28516, 6)
+# this is 42 frames going into the stack, with the 28516 sources
+# and 6 data for each source
+# the 6 data are: ra,dec,mag,dmag,fwhm,exptime
+# mag,dmag are the most important, while different photometry codes
+#  may or may not change the other values away from those in the d1 
+#  and d2 extensions
+# if a source is missing or undetected, it should have mag=dmag=0
