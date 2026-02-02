@@ -1,0 +1,1 @@
+These are the shell scripts to run the pipeline.  code in c can be found in the ccode sub-directory and should be copied into this level after compiling.
