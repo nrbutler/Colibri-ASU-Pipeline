@@ -1,0 +1,123 @@
+#!/bin/bash
+
+file_list=$1
+shift
+
+ndmin=8
+
+dark_archive_dir=${REDUX_BASE_DIR}/dark_bank
+cleanup=yes
+
+while [ $# -gt 0 ] ; do eval $1 ; shift ; done
+
+[ -f $file_list ] || { echo "No file $file_list" ; exit 1 ; }
+
+go_iter=0
+function gonogo() {
+    ((go_iter++))
+    [ "$((go_iter%NBATCH))" -eq 0 ] && wait
+}
+
+dte=`date -u +20%y%m%d_%H%M%S`
+file0=`head -1 $file_list`
+day=`basename $file0 | cut -c1-8`
+cam=`gethead CCD_NAME $file0`
+[ "$cam" ] || cam=`basename $file0 | cut -c16-17`
+exptime=`gethead EXPTIME $file0 | awk '{printf("%.0f",$1)}'`
+biasfile=bias_${cam}.fits
+dte1=`basename $file0 | sed -e 's/f//g' -e 's/C/ /g' | awk '{print $1}'`
+bin=`gethead BINNING $file0`
+[ "$bin" ] || bin=1
+rmode=`gethead READMODE $file0`
+[ "$rmode" ] || rmode=0
+tag=${dte1}_${cam}_w_${bin}_${rmode}_${exptime}
+me=`basename $0`
+here=`pwd`
+workdir=${here}/${me}_${dte}_$$
+[ -d $workdir ] || mkdir $workdir
+
+echo "Working in directory $workdir, logging to ${workdir}/${me}_${dte}_$$.log"
+exec > ${workdir}/${me}_${dte}_$$.log 2>&1
+
+gethead -p BINNING READMODE @$file_list | awk '{if($3~/'$rmode'/ && $2=='$bin') print $1}' > ${workdir}/dlist$$.txt
+
+nfiles=`cat ${workdir}/dlist$$.txt | wc -l`
+
+if [ "$nfiles" -lt "$ndmin" ]; then
+    echo "Not enough files with readmode $rmode and bin=$bin!"
+else
+
+    if [ -f "${workdir}/$biasfile" ]; then
+        echo "Using biasfile ${workdir}/$biasfile"
+    else
+        bias=`find_bias.sh $day $cam $bin $rmode`
+	if [ "$bias" ]; then
+            cd $workdir
+            echo funpack -O $biasfile $bias
+            funpack -O $biasfile $bias
+            cd $here
+	fi
+    fi
+
+    file0=`head -1 ${workdir}/dlist$$.txt`
+    exptime=`gethead EXPTIME $file0 | awk '{printf("%.0f",$1)}'`
+    dsec=`gethead DATASEC $file0`
+
+    NX=`gethead ZNAXIS1 $file0`
+    NY=`gethead ZNAXIS2 $file0`
+    NO=`echo $NX $NY | awk '{printf("%.0f\n", ($1-$2)/2)}'` # overscan width
+    [ "$NO" ] || NO=48
+
+    BIASSEC1=`echo $NY $NO | awk '{printf("[1:%d,1:%d]\n",$2,$1/2)}'`
+    BIASSEC2=`echo $NY $NO | awk '{printf("[1:%d,%d:%d]\n",$2,$1/2+1,$1)}'`
+    BIASSEC3=`echo $NY $NO | awk '{printf("[%d:%d,1:%d]\n",$1+$2+1,$1+$2*2,$1/2)}'`
+    BIASSEC4=`echo $NY $NO | awk '{printf("[%d:%d,%d:%d]\n",$1+$2+1,$1+$2*2,$1/2+1,$1)}'`
+
+    echo "Using $nfiles files to build the dark..."
+    echo "# file                     exptime  Bin RM"
+    gethead EXPTIME BINNING READMODE @${workdir}/dlist$$.txt | awk '{printf("%s %f %d %s\n",$1,$2,$3,$4)}'
+
+    function reduce_dark() {
+        local file=$1
+        local bfile=`basename $file`
+        local bfile0=${bfile%'.fz'}
+        local med0_1=`immed "${file}${BIASSEC1}" 2>/dev/null`
+        local med0_2=`immed "${file}${BIASSEC2}" 2>/dev/null`
+        local med0_3=`immed "${file}${BIASSEC3}" 2>/dev/null`
+        local med0_4=`immed "${file}${BIASSEC4}" 2>/dev/null`
+        local dti=`gethead EXPTIME $file | awk '{print 1/$1}'`
+        if [ -f "${workdir}/$biasfile" ]; then
+            echo darkreduce ${file}${dsec} ${workdir}/$biasfile ${workdir}/$bfile0 $med0_1 $med0_2 $med0_3 $med0_4
+            darkreduce ${file}${dsec} ${workdir}/$biasfile ${workdir}/$bfile0 $med0_1 $med0_2 $med0_3 $med0_4
+        else
+            echo darkreduce0 ${file}${dsec} ${workdir}/$bfile0 $med0_1 $med0_2 $med0_3 $med0_4
+            darkreduce0 ${file}${dsec} ${workdir}/$bfile0 $med0_1 $med0_2 $med0_3 $med0_4
+        fi
+        sethead BSCALE=$dti ${workdir}/$bfile0
+    }
+
+    for file in `cat ${workdir}/dlist$$.txt`; do
+        reduce_dark $file &
+        gonogo
+    done
+    wait
+    for file in `cat ${workdir}/dlist$$.txt`; do
+        bfile=`basename $file`
+        bfile0=${bfile%'.fz'}
+        ls ${workdir}/$bfile0 | awk -F/ '{print $NF}'
+    done > ${workdir}/dlist$$.tmp
+    cd $workdir
+    mv dlist$$.tmp dlist$$.txt
+
+    echo swarp @dlist$$.txt -c ${SWARP_DIR}/ratir_redux.swarp -COMBINE_TYPE MEDIAN -IMAGEOUT_NAME dark_${tag}.fits -WEIGHTOUT_NAME expmapdark_${tag}.fits -WEIGHT_TYPE NONE -RESAMPLE N -SUBTRACT_BACK N
+    swarp @dlist$$.txt -c ${SWARP_DIR}/ratir_redux.swarp -COMBINE_TYPE MEDIAN -IMAGEOUT_NAME dark_${tag}.fits -WEIGHTOUT_NAME expmapdark_${tag}.fits -WEIGHT_TYPE NONE -RESAMPLE N -SUBTRACT_BACK N 2>/dev/null
+    sethead EXPTIME=1.0 dark_${tag}.fits
+
+    fpack dark_${tag}.fits
+    cp dark_${tag}.fits.fz $dark_archive_dir
+
+fi
+
+cp ${workdir}/${me}_${dte}_$$.log ${dark_archive_dir}/dark_${tag}.log
+
+[ "$cleanup" = "yes" ] &&  rm -r $workdir

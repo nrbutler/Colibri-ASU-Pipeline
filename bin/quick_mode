@@ -1,0 +1,16 @@
+#!/bin/sh
+
+file=$1
+shift
+
+n=1
+min=-1.e99
+
+while [ $# -gt 0 ] ; do eval $1 ; shift ; done
+
+if [ "$n" = "NF" ]; then
+    n=`grep -v '#' $file | awk '{print NF;exit}'`
+    [ "$n" ] || n=1
+fi
+
+grep -v '#' $file | sort -n -k $n | awk '{if($'$n'>('$min')) print $'$n'}' | awk '{x[NR]=$1}END{dm=1.e99; i0=1; n=int(0.3*NR); if (n<2) n=NR-1; for (i=1;i<=NR-n;i++) {diff=x[i+n]-x[i]; if (diff<dm) {dm=diff;i0=i}}; n1=i0+int((n+1)/2); n2=i0+int(n/2); if (n>=0) print 0.5*(x[n1]+x[n2])}'

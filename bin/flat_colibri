@@ -1,0 +1,170 @@
+#!/bin/bash
+
+file_list=$1
+shift
+
+sat_level=32000.
+low_level=1000.
+nfmin=6
+filter=w
+
+flat_archive_dir=${REDUX_BASE_DIR}/flat_bank
+cleanup=yes
+
+while [ $# -gt 0 ] ; do eval $1 ; shift ; done
+
+[ -f $file_list ] || { echo "No file $file_list" ; exit 1 ; }
+
+go_iter=0
+function gonogo() {
+    ((go_iter++))
+    [ "$((go_iter%NBATCH))" -eq 0 ] && wait
+}
+
+dte=`date -u +20%y%m%d_%H%M%S`
+file0=`head -1 $file_list`
+day=`basename $file0 | cut -c1-8`
+cam=`gethead CCD_NAME $file0`
+[ "$cam" ] || cam=`basename $file0 | cut -c16-17`
+bin=`gethead BINNING $file0`
+[ "$bin" ] || bin=1
+if [ "$bin" -gt 1 ]; then
+    sat_level=`echo $sat_level $bin | awk '{printf("%.0f\n",$1*$2*$2)}'`
+    low_level=`echo $low_level $bin | awk '{printf("%.0f\n",$1*$2*$2)}'`
+fi
+rmode=`gethead READMODE $file0`
+[ "$rmode" ] || rmode=0
+biasfile=bias_${cam}.fits
+darkbase=dark_${cam}
+dte1=`basename $file0 | sed -e 's/f//g' -e 's/C/ /g' | awk '{print $1}'`
+tag=${dte1}_${cam}_${filter}_${bin}
+me=`basename $0`
+here=`pwd`
+workdir=${here}/${me}_${dte}_$$
+[ -d $workdir ] || mkdir $workdir
+
+echo "Working in directory $workdir, logging to ${workdir}/${me}_${dte}_$$.log"
+exec > ${workdir}/${me}_${dte}_$$.log 2>&1
+
+#gethead -p FILTER BINNING @$file_list | awk '{if($2~/'$filter'/ && $3=='$bin') print $1}' > ${workdir}/flist$$.txt
+gethead -p FILTER BINNING @$file_list | eval awk "'{if(\$2==\"$filter\" && \$3=='$bin') print \$1}'" > ${workdir}/flist$$.txt
+
+nfiles=`cat ${workdir}/flist$$.txt | wc -l`
+
+if [ "$nfiles" -ge "$nfmin" ]; then
+    file0=`head -1 ${workdir}/flist$$.txt`
+    dsec=`gethead DATASEC $file0`
+
+    NX=`gethead ZNAXIS1 $file0`
+    NY=`gethead ZNAXIS2 $file0`
+    NO=`echo $NX $NY | awk '{printf("%.0f\n", ($1-$2)/2)}'` # overscan width
+    [ "$NO" ] || NO=48
+
+    BIASSEC1=`echo $NY $NO | awk '{printf("[1:%d,1:%d]\n",$2,$1/2)}'`
+    BIASSEC2=`echo $NY $NO | awk '{printf("[1:%d,%d:%d]\n",$2,$1/2+1,$1)}'`
+    BIASSEC3=`echo $NY $NO | awk '{printf("[%d:%d,1:%d]\n",$1+$2+1,$1+$2*2,$1/2)}'`
+    BIASSEC4=`echo $NY $NO | awk '{printf("[%d:%d,%d:%d]\n",$1+$2+1,$1+$2*2,$1/2+1,$1)}'`
+
+    med0=0.0
+    for file in `cat ${workdir}/flist$$.txt`; do
+        med0_1=`immed "${file}${BIASSEC1}" 2>/dev/null`
+        med0_2=`immed "${file}${BIASSEC2}" 2>/dev/null`
+        med0_3=`immed "${file}${BIASSEC3}" 2>/dev/null`
+        med0_4=`immed "${file}${BIASSEC4}" 2>/dev/null`
+        med0=`echo $med0_1 $med0_2 $med0_3 $med0_4 | awk '{print ($1+$2+$3+$4)/4}' 2>/dev/null`
+        med1=`immed "${file}${dsec}"`
+        echo $med0 $med1 $file | awk '{dm=$2-$1; if (dm<'$sat_level' && dm>'$low_level') print $3}'
+    done > ${workdir}/flist$$.tmp
+
+    mv ${workdir}/flist$$.tmp ${workdir}/flist$$.txt
+    nfiles=`cat ${workdir}/flist$$.txt | wc -l`
+fi
+
+if [ "$nfiles" -lt "$nfmin" ]; then
+    echo "Not enough files with filter=$filter and bin=$bin!"
+else
+
+    if [ -f "${workdir}/$biasfile" ]; then
+        echo "Using biasfile ${workdir}/$biasfile"
+    else
+        bias=`find_bias.sh $day $cam $bin $rmode`
+        cd $workdir
+        echo funpack -O $biasfile $bias
+        funpack -O $biasfile $bias
+        cd $here
+    fi
+    darkfile0=`ls ${workdir}/${darkbase}* 2>/dev/null | head -1`
+    if [ -f "$darkfile0" ]; then
+        echo "Using darkfiles like $darkfile0"
+    else
+        darks=`find_dark.sh $day $cam $bin $rmode`
+        cd $workdir
+        for dark in $darks; do
+            dark0=`basename $dark`
+            dt=`echo ${dark0%'.fits.fz'} | awk -F_ '{print $NF}'`
+            darkfile0="${darkbase}_${dt}.fits"
+            echo funpack -O $darkfile0 $dark
+            funpack -O $darkfile0 $dark
+        done
+        cd $here
+    fi
+
+    file0=`head -1 ${workdir}/flist$$.txt`
+    dsec=`gethead DATASEC $file0`
+
+    darks=`ls ${workdir}/dark_${cam}_*.fits`
+    exptimes=`ls $darks | awk -F_ '{print $NF}' | sed -e 's/\.fits//g'`
+
+    function reduce_flat() {
+        local file=$1
+        local bfile=`basename $file`
+        local bfile0=${bfile%'.fz'}
+        local med0_1=`immed "${file}${BIASSEC1}" 2>/dev/null`
+        local med0_2=`immed "${file}${BIASSEC2}" 2>/dev/null`
+        local med0_3=`immed "${file}${BIASSEC3}" 2>/dev/null`
+        local med0_4=`immed "${file}${BIASSEC4}" 2>/dev/null`
+        local exptime=`gethead EXPTIME $file`
+        local exptime0=`echo $exptimes | awk '{mn=1.e56; for (i=1;i<=NF;i++) {df=$i-'$exptime'; if (df<0) df=-df; if (df<mn) {mn=df;dt=$i}}; print dt}'`
+        local darkfile=`ls ${workdir}/dark_${cam}_${exptime0}.fits 2>/dev/null`
+        if [ -f "$darkfile" ]; then
+	    echo flatreduce ${file}${dsec} ${workdir}/$biasfile $darkfile ${workdir}/$bfile0 $med0_1 $med0_2 $med0_3 $med0_4
+	    flatreduce ${file}${dsec} ${workdir}/$biasfile $darkfile ${workdir}/$bfile0 $med0_1 $med0_2 $med0_3 $med0_4
+	else
+            echo flatreduce0 ${file}${dsec} ${workdir}/$biasfile ${workdir}/$bfile0 $med0_1 $med0_2 $med0_3 $med0_4
+            flatreduce0 ${file}${dsec} ${workdir}/$biasfile ${workdir}/$bfile0 $med0_1 $med0_2 $med0_3 $med0_4
+	fi
+        local med1=`immed "${workdir}/$bfile0"`
+        local imed1=`echo $med1 | awk '{print 1/$1}'`
+        sethead SKYLEV=$med1 BSCALE=$imed1 ${workdir}/$bfile0
+        cphead FILTER BINNING $file ${workdir}/$bfile0
+    }
+
+    for file in `cat ${workdir}/flist$$.txt`; do
+        reduce_flat $file &
+        gonogo
+    done
+    wait
+
+    for file in `cat ${workdir}/flist$$.txt`; do
+        bfile=`basename $file`
+        bfile0=${bfile%'.fz'}
+        ls ${workdir}/$bfile0 | awk -F/ '{print $NF}'
+    done > ${workdir}/flist$$.tmp
+    cd $workdir
+    mv flist$$.tmp flist$$.txt
+
+    echo "Using $n files to build the flat..."
+    echo "# file                   sky_level  F Bin"
+    gethead SKYLEV FILTER BINNING @flist$$.txt
+
+    echo swarp @flist$$.txt -c ${SWARP_DIR}/ratir_redux.swarp -COMBINE_TYPE MEDIAN -IMAGEOUT_NAME flat_${tag}.fits -WEIGHTOUT_NAME expmapflat_${tag}.fits -WEIGHT_TYPE NONE -RESAMPLE N -SUBTRACT_BACK N
+    swarp @flist$$.txt -c ${SWARP_DIR}/ratir_redux.swarp -COMBINE_TYPE MEDIAN -IMAGEOUT_NAME flat_${tag}.fits -WEIGHTOUT_NAME expmapflat_${tag}.fits -WEIGHT_TYPE NONE -RESAMPLE N -SUBTRACT_BACK N 2>/dev/null
+
+    fpack flat_${tag}.fits
+    cp flat_${tag}.fits.fz $flat_archive_dir
+
+fi
+
+cp ${workdir}/${me}_${dte}_$$.log ${flat_archive_dir}/flat_${tag}.log
+
+[ "$cleanup" = "yes" ] &&  rm -r $workdir

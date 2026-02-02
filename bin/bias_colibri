@@ -1,0 +1,114 @@
+#!/bin/bash
+
+file_list=$1
+shift
+
+nbmin=8
+
+bias_archive_dir=${REDUX_BASE_DIR}/bias_bank
+cleanup=yes
+
+while [ $# -gt 0 ] ; do eval $1 ; shift ; done
+
+[ -f $file_list ] || { echo "No file $file_list" ; exit 1 ; }
+
+go_iter=0
+function gonogo() {
+    ((go_iter++))
+    [ "$((go_iter%NBATCH))" -eq 0 ] && wait
+}
+
+dte=`date -u +20%y%m%d_%H%M%S`
+file0=`head -1 $file_list`
+ccd=`gethead CCD_NAME $file0`
+[ "$ccd" ] || ccd=`basename $file0 | cut -c16-17`
+dte1=`basename $file0 | sed -e 's/f//g' -e 's/C/ /g' | awk '{print $1}'`
+bin=`gethead BINNING $file0`
+[ "$bin" ] || bin=1
+rmode=`gethead READMODE $file0`
+[ "$rmode" ] || rmode=0
+tag=${dte1}_${ccd}_w_${bin}_${rmode}
+me=`basename $0`
+here=`pwd`
+workdir=${here}/${me}_${dte}_$$
+[ -d $workdir ] || mkdir $workdir
+
+echo "Working in directory $workdir, logging to ${workdir}/${me}_${dte}_$$.log"
+exec > ${workdir}/${me}_${dte}_$$.log 2>&1
+
+gethead -p BINNING READMODE @$file_list | awk '{if($2=='$bin' && $3~/'$rmode'/) print $1}' > ${workdir}/blist$$.txt
+
+nfiles=`cat ${workdir}/blist$$.txt | wc -l`
+
+file0=`head -1 ${workdir}/blist$$.txt `
+dsec=`gethead DATASEC $file0`
+
+NX=`gethead ZNAXIS1 $file0`
+NY=`gethead ZNAXIS2 $file0`
+NO=`echo $NX $NY | awk '{printf("%.0f\n", ($1-$2)/2)}'` # overscan width
+[ "$NO" ] || NO=48
+
+BIASSEC1=`echo $NY $NO | awk '{printf("[1:%d,1:%d]\n",$2,$1/2)}'`
+BIASSEC2=`echo $NY $NO | awk '{printf("[1:%d,%d:%d]\n",$2,$1/2+1,$1)}'`
+BIASSEC3=`echo $NY $NO | awk '{printf("[%d:%d,1:%d]\n",$1+$2+1,$1+$2*2,$1/2)}'`
+BIASSEC4=`echo $NY $NO | awk '{printf("[%d:%d,%d:%d]\n",$1+$2+1,$1+$2*2,$1/2+1,$1)}'`
+#BIASSEC1='[1:48,1:2048]'
+#BIASSEC2='[1:48,2049:4096]'
+#BIASSEC3='[4145:4192,1:2048]'
+#BIASSEC4='[4145:4192,2049:4096]'
+
+if [ "$nfiles" -lt "$nbmin" ]; then
+    echo "Not enough files with readmode $rmode and bin=$bin!"
+else
+
+    function breduce() {
+        local file=$1
+        local bfile0=$2
+        local med0_1=`immed "${file}${BIASSEC1}" 2>/dev/null`
+        local med0_2=`immed "${file}${BIASSEC2}" 2>/dev/null`
+        local med0_3=`immed "${file}${BIASSEC3}" 2>/dev/null`
+        local med0_4=`immed "${file}${BIASSEC4}" 2>/dev/null`
+        local med0=`echo $med0_1 $med0_2 $med0_3 $med0_4 | awk '{print ($1+$2+$3+$4)/4}' 2>/dev/null`
+        echo biasreduce "${file}${dsec}" ${workdir}/$bfile0 $med0_1 $med0_2 $med0_3 $med0_4
+        biasreduce "${file}${dsec}" ${workdir}/$bfile0 $med0_1 $med0_2 $med0_3 $med0_4
+        sethead MED0=$med0 MED0_1=$med0_1 MED0_2=$med0_2 MED0_3=$med0_3 MED0_4=$med0_4 ${workdir}/$bfile0
+    }
+
+    for file in `cat ${workdir}/blist$$.txt`; do
+        bfile=`basename $file`
+        bfile0=${bfile%'.fz'}
+        breduce $file $bfile0 &
+        gonogo
+    done
+    wait
+    for file in `cat ${workdir}/blist$$.txt`; do
+        bfile=`basename $file`
+        bfile0=${bfile%'.fz'}
+        ls ${workdir}/$bfile0 | awk -F/ '{print $NF}'
+    done > ${workdir}/blist$$.tmp
+    cd $workdir
+    mv blist$$.tmp blist$$.txt
+
+    echo "Using $nfiles files to build the bias..."
+    echo "# file                  biaslevel biaslevel1 biaslevel2 biaslevel3 biaslevel4 Bin RM"
+    gethead MED0 MED0_1 MED0_2 MED0_3 MED0_4 BINNING READMODE @blist$$.txt | awk '{printf("%s %f %f %f %f %f %d %s\n",$1,$2,$3,$4,$5,$6,$7,$8)}' > levels$$.txt
+    cat levels$$.txt
+
+    med0=`awk '{s=s+$2}END{print s/NR}' levels$$.txt`
+    med0_1=`awk '{s=s+$3}END{print s/NR}' levels$$.txt`
+    med0_2=`awk '{s=s+$4}END{print s/NR}' levels$$.txt`
+    med0_3=`awk '{s=s+$5}END{print s/NR}' levels$$.txt`
+    med0_4=`awk '{s=s+$6}END{print s/NR}' levels$$.txt`
+
+    echo swarp @blist$$.txt -c ${SWARP_DIR}/ratir_redux.swarp -COMBINE_TYPE MEDIAN -IMAGEOUT_NAME bias_${tag}.fits -WEIGHTOUT_NAME expmapbias_${tag}.fits -WEIGHT_TYPE NONE -RESAMPLE N -SUBTRACT_BACK N
+    swarp @blist$$.txt -c ${SWARP_DIR}/ratir_redux.swarp -COMBINE_TYPE MEDIAN -IMAGEOUT_NAME bias_${tag}.fits -WEIGHTOUT_NAME expmapbias_${tag}.fits -WEIGHT_TYPE NONE -RESAMPLE N -SUBTRACT_BACK N 2>/dev/null
+
+    sethead MED0=$med0 MED0_1=$med0_1 MED0_2=$med0_2 MED0_3=$med0_3 MED0_4=$med0_4 bias_${tag}.fits
+    fpack bias_${tag}.fits
+    cp bias_${tag}.fits.fz $bias_archive_dir
+
+fi
+
+cp ${workdir}/${me}_${dte}_$$.log ${bias_archive_dir}/bias_${tag}.log
+
+[ "$cleanup" = "yes" ] &&  rm -r $workdir
